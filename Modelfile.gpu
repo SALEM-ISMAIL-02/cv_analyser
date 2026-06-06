@@ -1,0 +1,5 @@
+# Full GPU on GTX 1650 4GB — use 3B model, NOT 7B
+FROM llama3.2:3b
+
+PARAMETER num_gpu 99
+PARAMETER num_ctx 4096

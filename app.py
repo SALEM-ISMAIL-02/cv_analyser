@@ -1,36 +1,86 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from utils.cv_processing_utils import split_cv_into_sections, process_cv, combine_results
-from utils.file_extractor import extract_text_from_pdf, extract_text_from_docx
-from models.t5_model import OllamaModel
+import os
 
-app = FastAPI()
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from models.llm_extractor import CvExtractor, OllamaConnectionError, OllamaModelNotFoundError
+from schemas.cv_schema import CvDocument
+from utils.file_extractor import extract_text_from_pdf
+from utils.text_hints import extract_hints
 
-# Initialize the Ollama model
-ollama_model = OllamaModel(model_name="llama3.2:3b")
+app = FastAPI(
+    title="CV Analyser",
+    description=(
+        "Extract structured career data from text-based PDF CVs into "
+        "[FreeCV cv.json v1.2](https://freecv.org/schema/cv/v1.json) format. "
+        "Requires a local [Ollama](https://ollama.com) instance."
+    ),
+    version="1.0.0",
+)
 
-@app.post("/upload/")
-async def upload_cv(file: UploadFile = File(...)):
-    if not file.filename.endswith(('.pdf', '.docx')):
-        raise HTTPException(status_code=400, detail="Unsupported file format. Please upload a PDF or DOCX file.")
+extractor = CvExtractor(model_name=os.getenv("OLLAMA_MODEL", "llama3.2:3b-gpu"))
 
-    # Extract text from the file
-    if file.filename.endswith('.pdf'):
+
+@app.on_event("startup")
+def warmup_model():
+    try:
+        extractor.warmup()
+    except Exception:
+        pass
+
+
+@app.get("/health", tags=["System"])
+def health():
+    """Check Ollama connectivity and whether the configured model is available."""
+    return extractor.health_check()
+
+
+@app.post(
+    "/extract",
+    response_model=CvDocument,
+    tags=["CV"],
+    summary="Extract CV from PDF",
+    response_description="Structured cv.json document (FreeCV v1.2)",
+)
+async def extract_cv(file: UploadFile = File(..., description="Text-based PDF resume")):
+    """
+    Upload a PDF resume and receive structured JSON matching the FreeCV cv.json schema.
+
+    **Requirements**
+    - PDF must contain selectable text (not a scanned image)
+    - Ollama with `llama3.2:3b-gpu` (fits GTX 1650 4GB on GPU)
+
+  **Setup:** `.\\scripts\\setup_ollama_gpu.ps1` then `.\\scripts\\start.ps1`
+    Never set `OLLAMA_NUM_GPU=0` — that forces CPU-only.
+    """
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    try:
         text = extract_text_from_pdf(file.file)
-    elif file.filename.endswith('.docx'):
-        text = extract_text_from_docx(file.file)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to read PDF: {exc}") from exc
 
-    # Process the CV in chunks
-    structured_data = ollama_model.process_cv(text)
+    hints = extract_hints(text)
 
-    # Return the structured data
-    return {"structured_data": structured_data}
+    health = extractor.health_check()
+    if health.get("status") == "model_missing":
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Model '{health.get('configured_model')}' not installed. "
+                "Run: .\\scripts\\setup_ollama_gpu.ps1  "
+                f"(installed: {health.get('available_models', [])})"
+            ),
+        )
 
-@app.post("/improve/")
-async def improve_cv_endpoint(cv_data: dict):
-    """
-    Improve the CV by enhancing content and generating suggestions.
-    :param cv_data: A dictionary containing structured CV data.
-    :return: A dictionary with improved CV content and suggestions.
-    """
-    improved_data = ollama_model.improve_cv(cv_data)
-    return {"improved_data": improved_data}
+    try:
+        cv = extractor.process_cv(text, hints=hints)
+    except OllamaConnectionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except OllamaModelNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {exc}") from exc
+
+    return cv

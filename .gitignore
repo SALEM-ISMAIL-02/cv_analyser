@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+
+# Legacy committed venv artifacts (use .venv instead)
+Lib/
+Include/
+pyvenv.cfg
+share/
+Scripts/activate
+Scripts/Activate.ps1
+Scripts/*.exe
+Scripts/*.pyd
+Scripts/*.dll
+Scripts/*.py
+!Scripts/setup_ollama_gpu.ps1
+!Scripts/start.ps1
